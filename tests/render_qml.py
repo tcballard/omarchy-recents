@@ -40,7 +40,10 @@ def finish():
              if item.objectName() in ('recent-file-name','recent-file-parent','recent-detail','recent-message')}
     assert len(sinks)==4, sinks.keys()
     for name,item in sinks.items():
-        assert item.property('textFormat')==0, name  # QQuickText.PlainText
+        # QQuickText's private enum has no direct PySide converter. Compare it
+        # inside Qt's JS engine, which reads the QML property as a number.
+        engine.globalObject().setProperty('sinkUnderTest',engine.newQObject(item))
+        assert engine.evaluate('sinkUnderTest.textFormat === 0').toBool(), name
     # Letter action keys remain ordinary typing while searching.
     QTest.keyClick(win,Qt.Key.Key_D);assert panel.property('query')=='d';assert panel.property('pendingPath')==''
     QTest.keyClick(win,Qt.Key.Key_Backspace)
