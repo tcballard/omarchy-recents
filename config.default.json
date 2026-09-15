@@ -1,0 +1,10 @@
+{
+  "windowDays": 14,
+  "maxDepth": 6,
+  "extraRoots": [],
+  "excludeGlobs": ["*.tmp", "*~", "*.swp"],
+  "sources": {"find": true, "xbel": true, "browsers": false},
+  "showTodayCount": false,
+  "plainGlyphs": false,
+  "openWith": {}
+}

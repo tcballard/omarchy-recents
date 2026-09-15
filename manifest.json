@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.tcballard.recents",
+  "name": "Recents",
+  "version": "0.1.0",
+  "author": "Tom Ballard",
+  "license": "MIT",
+  "description": "Browse files you edited, opened or downloaded recently.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Recents",
+    "description": "Browse files you edited, opened or downloaded recently.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

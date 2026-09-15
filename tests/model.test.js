@@ -1,0 +1,12 @@
+const test=require('node:test'), assert=require('node:assert/strict'), M=require('../Model.js');
+const now=Date.parse('2026-09-15T12:00:00Z')/1000;
+const row=(path,age,source='edited',kind='Docs')=>({path,ts:now-age,source,kind});
+test('canonical input merges source tags and uses newest timestamp',()=>{const r=M.merge([row('/home/a',20),row('/home/a',10,'opened')],now,14);assert.equal(r.length,1);assert.equal(r[0].ts,now-10);assert.deepEqual(r[0].sources,['edited','opened'])});
+test('window excludes old rows and clamps future values',()=>{assert.deepEqual(M.merge([row('/old',15*86400)],now,14),[]);assert.equal(M.merge([row('/future',-20)],now,14)[0].ts,now)});
+test('index is capped after ranking',()=>{const r=M.merge(Array.from({length:2500},(_,i)=>row('/'+i,i)),now,14);assert.equal(r.length,2000);assert.equal(r[0].path,'/0')});
+test('fuzzy requires complete subsequence',()=>{assert.equal(M.fuzzy('xyz','invoice'),0);assert.ok(M.fuzzy('ivc','invoice')>0);assert.ok(M.fuzzy('invoice','invoice')>M.fuzzy('ivc','invoice'))});
+test('source and kind filters intersect',()=>{const r=M.merge([row('/a.pdf',2,'opened'),row('/a.png',1,'edited','Images')],now,14);assert.deepEqual(M.select(r,'','Images','opened',now),[])});
+test('search matches parent and uses recency decay',()=>{const r=M.merge([row('/invoices/a.pdf',4*86400),row('/invoices/b.pdf',86400)],now,14);assert.equal(M.select(r,'invoices','All','All',now)[0].path,'/invoices/b.pdf')});
+test('home abbreviation uses a component boundary',()=>{assert.equal(M.parent('/home/tom2/a','/home/tom'),'/home/tom2');assert.equal(M.parent('/home/tom/a','/home/tom'),'~')});
+test('calendar groups use local midnight and Monday',()=>{const local=new Date(2026,8,15,12).getTime()/1000;assert.equal(M.group(local-3600,local),'Today');assert.equal(M.group(local-86400,local),'Yesterday');assert.equal(M.group(local-8*86400,local),'Earlier')});
+test('prototype-shaped paths remain data',()=>{assert.equal(M.merge([row('/__proto__',1)],now,14).length,1)});

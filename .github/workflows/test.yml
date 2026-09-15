@@ -1,0 +1,27 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: ./tests/run
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck libegl1 libopengl0 libxcb-cursor0
+      - run: shellcheck bin/recents-scan bin/recents-act tests/run
+      - run: python3 -m pip install PySide6==6.11.2
+      - run: python3 tests/service_qml.py
+      - run: python3 tests/render_qml.py /tmp/recents-dark.png
+      - run: PREVIEW_LIGHT=1 python3 tests/render_qml.py /tmp/recents-light.png
+      - run: PREVIEW_WIDTH=520 PREVIEW_HEIGHT=460 python3 tests/render_qml.py /tmp/recents-compact.png
+      - run: PREVIEW_SCALE=2 PREVIEW_WIDTH=1600 PREVIEW_HEIGHT=1300 python3 tests/render_qml.py /tmp/recents-large.png

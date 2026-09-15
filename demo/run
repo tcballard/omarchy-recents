@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "$0")/.."
+exec python3 tests/render_qml.py "${1:-/tmp/recents-preview.png}"
