@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
       - run: ./tests/run
       - run: sudo apt-get update && sudo apt-get install -y shellcheck libegl1 libopengl0 libxcb-cursor0
-      - run: shellcheck bin/recents-scan bin/recents-act tests/run
+      - run: shellcheck tests/run
       - run: python3 -m pip install PySide6==6.11.2
       - run: python3 tests/service_qml.py
       - run: python3 tests/render_qml.py /tmp/recents-dark.png

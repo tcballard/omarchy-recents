@@ -24,7 +24,7 @@ Item {
     readonly property string helper: Qt.resolvedUrl("bin/recents-scan").toString().replace(/^file:\/\//, "")
     function refresh(scheduled) {
         if (!alive || scanProcess.running || cacheProcess.running) return
-        scanProcess.command = ["timeout", "160s", decodeURIComponent(helper), scheduled ? "scheduled" : "scan"]
+        scanProcess.command = ["/usr/bin/timeout", "160s", decodeURIComponent(helper), scheduled ? "scheduled" : "scan"]
         scanProcess.running = true
     }
     function accept(text, code, cached) {
@@ -46,26 +46,26 @@ Item {
     }
     function panelOpened() { if (Date.now()/1000-lastScan>60) refresh(false) }
     function removePaths(paths) { rows=rows.filter(function(r) { return paths.indexOf(r.path)<0 }) }
-    Process {
+    HelperProcess {
         id: glyphProcess
-        command: ["timeout","3s",decodeURIComponent(root.helper),"glyphs",root.fontFamily]
+        command: ["/usr/bin/timeout","3s",decodeURIComponent(root.helper),"glyphs",root.fontFamily]
         stdout: StdioCollector { id: glyphOutput }
         onExited: function(code) { try { root.glyphsSupported=code===0 && JSON.parse(glyphOutput.text).supported } catch(e) { root.glyphsSupported=false } }
     }
-    Process {
+    HelperProcess {
         id: cacheProcess
-        command: ["timeout", "5s", decodeURIComponent(root.helper), "cached"]
+        command: ["/usr/bin/timeout", "5s", decodeURIComponent(root.helper), "cached"]
         stdout: StdioCollector { id: cacheOutput }
         onExited: function(code) { root.accept(cacheOutput.text,code,true) }
     }
-    Process {
+    HelperProcess {
         id: scanProcess
         stdout: StdioCollector { id: scanOutput }
         onExited: function(code) { root.accept(scanOutput.text,code,false) }
     }
-    Process {
+    HelperProcess {
         id: pollProcess
-        command: ["timeout", "3s", decodeURIComponent(root.helper), "poll"]
+        command: ["/usr/bin/timeout", "3s", decodeURIComponent(root.helper), "poll"]
         stdout: StdioCollector { id: pollOutput }
         onExited: function(code) {
             if (!root.alive || code!==0) return

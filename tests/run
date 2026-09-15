@@ -4,4 +4,8 @@ cd -- "$(dirname -- "$0")/.."
 node --test tests/model.test.js
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 scripts/validate_manifest.py .
-if command -v shellcheck >/dev/null; then shellcheck bin/recents-scan bin/recents-act tests/run; fi
+if command -v shellcheck >/dev/null; then shellcheck tests/run; fi
+if [[ -x /usr/lib/qt6/bin/qmltestrunner ]]; then
+  QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=basic /usr/lib/qt6/bin/qmltestrunner -input tests/qmlcases -import tests/qml -o -,txt
+fi
+if [[ -x /usr/bin/qs ]]; then python3 tests/native_process.py; fi

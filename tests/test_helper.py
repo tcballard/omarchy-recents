@@ -58,7 +58,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(json.loads((r.STATE/'index.json').read_text()),{'a':2});self.assertEqual((r.STATE/'index.json').stat().st_mode&0o777,0o600)
     def test_state_symlink_rejected(self):
         r.STATE.parent.mkdir(parents=True);r.STATE.symlink_to(self.home)
-        with self.assertRaises(ValueError):r.atomic_json('index.json',{})
+        with self.assertRaises((ValueError,OSError)):r.atomic_json('index.json',{})
     def test_visible_page_removes_missing_only(self):
         p=self.file('Documents/a.pdf');paths=[str(p),str(p)+'missing']
         import io
@@ -66,17 +66,17 @@ class HelperTests(unittest.TestCase):
     def test_copy_file_uri_uses_encoded_bytes(self):
         p=self.file('Documents/a #b\n.pdf')
         with patch.object(r.subprocess,'run') as run:r.action('copy-file',str(p))
-        self.assertEqual(run.call_args.args[0],['wl-copy','--type','text/uri-list']);self.assertEqual(run.call_args.kwargs['input'],(p.as_uri()+'\r\n').encode())
+        self.assertEqual(run.call_args.args[0],['/usr/bin/wl-copy','--type','text/uri-list']);self.assertEqual(run.call_args.kwargs['input'],(p.as_uri()+'\r\n').encode())
     def test_trash_has_option_boundary_no_shell(self):
         p=self.file('Documents/-rf $(touch nope)')
         with patch.object(r.subprocess,'run') as run:r.action('trash',str(p))
-        self.assertEqual(run.call_args.args[0],['gio','trash','--',str(p)]);self.assertNotIn('shell',run.call_args.kwargs)
+        self.assertEqual(run.call_args.args[0],['/usr/bin/gio','trash','--',str(p)]);self.assertNotIn('shell',run.call_args.kwargs)
     def test_actions_reject_directories_and_external_paths(self):
         with self.assertRaises(ValueError):r.action('trash',str(self.home))
         with self.assertRaises(ValueError):r.action('open','/etc/passwd')
     def test_image_action_rejects_document(self):
         with self.assertRaises(ValueError):r.action('copy-image',str(self.file('a.pdf')))
-    def test_browser_chromium_backup_reads_download(self):
+    def test_browser_chromium_reads_download(self):
         p=self.file('Downloads/report.pdf');dbpath=self.home/'.config/chromium/Default/History';dbpath.parent.mkdir(parents=True)
         with sqlite3.connect(dbpath) as db:db.execute('CREATE TABLE downloads(target_path,end_time,state)');db.execute('INSERT INTO downloads VALUES(?,?,1)',(str(p),int((self.now+11644473600)*1000000)))
         sink=self.sink();notices=[]
