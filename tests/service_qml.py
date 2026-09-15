@@ -10,6 +10,6 @@ errors=[];engine.warnings.connect(lambda es:errors.extend(e.toString() for e in 
 engine.load(QUrl.fromLocalFile(str(root/'tests/ServiceChecks.qml')))
 if not engine.rootObjects():sys.exit(1)
 obj=engine.rootObjects()[0];QMetaObject.invokeMethod(obj,'run')
-assert obj.property('passed')==10,(obj.property('passed'),errors)
+assert obj.property('passed')==11,(obj.property('passed'),errors)
 assert not errors,errors
-print('10 assertions against actual Service.qml passed')
+print('11 assertions against actual Service.qml passed')

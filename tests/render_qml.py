@@ -31,6 +31,16 @@ def finish():
     output=Path(sys.argv[1] if len(sys.argv)>1 else root/'preview.png');output.parent.mkdir(parents=True,exist_ok=True)
     assert win.grabWindow().save(str(output))
     search=panel.findChild(QObject,'search')
+    # Delegates belong to the visual item tree, not necessarily QObject parents.
+    def visual_items(item):
+        yield item
+        for child in item.childItems():
+            yield from visual_items(child)
+    sinks = {item.objectName(): item for item in visual_items(win.contentItem())
+             if item.objectName() in ('recent-file-name','recent-file-parent','recent-detail','recent-message')}
+    assert len(sinks)==4, sinks.keys()
+    for name,item in sinks.items():
+        assert item.property('textFormat')==0, name  # QQuickText.PlainText
     # Letter action keys remain ordinary typing while searching.
     QTest.keyClick(win,Qt.Key.Key_D);assert panel.property('query')=='d';assert panel.property('pendingPath')==''
     QTest.keyClick(win,Qt.Key.Key_Backspace)

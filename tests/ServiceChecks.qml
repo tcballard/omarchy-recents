@@ -10,6 +10,7 @@ Item {
         for(var i=0;i<svc.children.length;i++) if('command' in svc.children[i] && 'finish' in svc.children[i])procs.push(svc.children[i])
         var cache=procs.filter(function(p){return p.command.indexOf('cached')>=0})[0]
         var scan=procs.filter(function(p){return p.command.length===0})[0]
+        check(cache.clearEnvironment && cache.environment.PATH==='/usr/bin' && !('PYTHONPATH' in cache.environment) && !('LD_PRELOAD' in cache.environment),'helper environment is restricted')
         cache.finish(0,JSON.stringify({rows:[],config:{windowDays:14},scannedAt:0}),"")
         check(!svc.initialized,'empty cache is not a completed scan')
         svc.refresh(false);check(scan.running,'scan starts');var cmd=JSON.stringify(scan.command)

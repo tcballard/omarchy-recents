@@ -1,3 +1,7 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec python3 "$(dirname -- "$(readlink -f -- "$0")")/recents.py" "$@"
+#!/usr/bin/python3 -I
+"""Isolated entry point for the Recents helper."""
+import os
+import runpy
+import sys
+
+runpy.run_path(os.path.join(os.path.dirname(os.path.realpath(__file__)), "recents.py"), run_name="__main__")

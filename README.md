@@ -14,7 +14,7 @@ A keyboard-first recent-files panel for Omarchy Quattro. Browse edited files, GT
 
 ## Install
 
-Requires Quattro, Bash, Python 3.10+, GNU findutils/coreutils, xdg-user-dirs, xdg-utils, GLib (`gio`, `gdbus`), wl-clipboard and fontconfig. Python uses only its standard library, including SQLite for optional browser reading. No pip packages, Node runtime, compile-on-install or installation hooks.
+Requires Quattro, Python 3.11+, GNU findutils/coreutils, xdg-user-dirs, xdg-utils, GLib (`gio`, `gdbus`), wl-clipboard and fontconfig. Python uses only its standard library, including SQLite for optional browser reading. No pip packages, Node runtime, compile-on-install or installation hooks.
 
 ```sh
 omarchy plugin add https://github.com/tcballard/omarchy-recents.git --enable
@@ -73,7 +73,7 @@ Zero configuration is required. Copy `config.default.json` to `~/.config/recents
 
 `windowDays`: 1–365. `maxDepth`: 1–12. `extraRoots`: existing directories beneath home, excluding home itself. XDG dirs resolving to home are skipped. Custom `OMARCHY_SCREENSHOT_DIR` and `OMARCHY_SCREENRECORD_DIR` under home are included. XDG config/data/state overrides are respected.
 
-`openWith` accepts argv arrays or quoted command strings, split into arguments. The absolute selected path is appended. No shell evaluation, environment expansion or pipelines.
+`openWith` accepts argv arrays or quoted command strings, split into arguments. The absolute selected path is appended. No shell evaluation, environment expansion or pipelines. Commands are looked up only in `/usr/bin`; use an absolute path for a custom application outside that directory.
 
 Popup colours and fonts follow Quattro, including live theme changes. Fontconfig checks glyph coverage; missing/unknown coverage uses plain tags such as `[doc]`. `plainGlyphs` forces these. Vertical bars omit the optional today count.
 
@@ -81,7 +81,7 @@ Popup colours and fonts follow Quattro, including live theme changes. Fontconfig
 
 - **Edited:** GNU find uses the newer modification or inode-change timestamp. Inode change is not reliable creation time; permission changes can make files recent. Hidden paths, node_modules, temporary downloads and configured globs are excluded. Default depth: six.
 - **Opened:** GTK `recently-used.xbel` visited/modified timestamps and MIME types. Only local file URIs beneath home. Coverage depends on the app: not every Linux application records opened files.
-- **Downloaded, opt-in:** standard Chromium/Chrome/Brave profiles beneath XDG config, and Firefox under `~/.mozilla/firefox`. Reads History/places databases, including a temporary database copy. It does not read cookie/password databases. SQLite backup includes WAL changes and creates a consistent private copy under the owned `XDG_RUNTIME_DIR`, removed afterwards. Flatpak, Snap and custom profiles are not discovered. Unavailable schemas produce an incomplete-source notice.
+- **Downloaded, opt-in:** standard Chromium/Chrome/Brave profiles beneath XDG config, and Firefox under `~/.mozilla/firefox`. Reads History/places databases in a read-only SQLite transaction, including committed WAL changes. It does not read cookie/password databases or copy the database. Each transaction checks the logical database size, including WAL pages, against 256 MB and has a four-second query deadline. SQLite values are limited to 64 KiB; oversized or unavailable profiles produce an incomplete-source notice. Flatpak, Snap and custom profiles are not discovered. Unavailable schemas produce an incomplete-source notice.
 
 Exclusions apply across sources. Paths are canonicalised; external symlinks rejected. Renames appear as new paths. Missing files are removed by an asynchronous visible-page check on opening/scrolling. Slow stat does not block the panel.
 
@@ -93,7 +93,11 @@ Each filesystem root has a 15-second deadline with partial results; all filesyst
 
 Only the most recent 2,000 paths are indexed. Search covers that index, using fuzzy matching and a three-day recency half-life. Date headers are hidden during ranked search. Normal browsing uses local Today, Yesterday, Monday-based This week and Earlier.
 
-State contains paths, timestamps and source tags, written atomically with private permissions under `~/.local/state/recents`. Nothing is uploaded. Empty, failed, partial and battery-paused scans are distinct; failed scans retain the last successful index.
+Metadata JSON and GTK history reads are bounded to 16 MB on the opened regular file, including concurrent growth. Symlinks and non-regular metadata files are rejected.
+
+Helpers use isolated `/usr/bin/python3 -I`, fixed system-tool paths, and an explicit environment containing desktop routing, locale and XDG locations. Python, dynamic-loader and shell-startup overrides are not inherited from the shell.
+
+State contains paths, timestamps and source tags, written atomically with private permissions under `~/.local/state/recents`. State directories must be owned by you with mode `0700`; files must be private, owned regular files. Symlinked or writable ancestors are rejected (a root-owned sticky temporary ancestor is allowed). Unsafe existing state is rejected with an error, never silently repaired. Reads and replacements use retained directory descriptors. Nothing is uploaded. Empty, failed, partial and battery-paused scans are distinct. If every enabled source fails without returning usable rows, the last successful index is retained; successful empty scans and disabling every source can clear it.
 
 Walker/launcher search and Recents can coexist: this is a time-ordered browsing panel. It does not replace a launcher provider or claim that no launcher offers recents. Full-text search and thumbnails are deferred.
 
@@ -101,7 +105,7 @@ Walker/launcher search and Recents can coexist: this is a time-ordered browsing 
 
 ```sh
 ./tests/run
-shellcheck bin/recents-scan bin/recents-act tests/run
+shellcheck tests/run
 # Optional development-only dependency:
 python3 -m pip install PySide6==6.11.2
 python3 tests/service_qml.py

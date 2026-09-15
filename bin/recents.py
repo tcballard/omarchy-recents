@@ -1,6 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Bounded local metadata reader. No shell evaluation, network or permanent deletion."""
 import datetime as dt
+from contextlib import contextmanager, closing
 import fnmatch
 import functools
 import re
@@ -10,31 +11,52 @@ import mimetypes
 import os
 from pathlib import Path
 import selectors
+import secrets
 import shlex
 import sqlite3
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 
 LIMIT = 2000
+JSON_LIMIT = 16_000_000
+BROWSER_LIMIT = 256_000_000
 DEFAULT = json.loads((Path(__file__).parent.parent / 'config.default.json').read_text())
 HOME = Path.home().resolve()
 STATE = Path(os.environ.get('XDG_STATE_HOME', HOME / '.local/state')) / 'recents'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config')) / 'recents/config.json'
 XBEL = Path(os.environ.get('XDG_DATA_HOME', HOME / '.local/share')) / 'recently-used.xbel'
+ENV_KEYS = ('HOME', 'USER', 'LOGNAME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
+            'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'XDG_DATA_DIRS', 'XDG_CONFIG_DIRS',
+            'XDG_CURRENT_DESKTOP', 'XDG_SESSION_TYPE', 'WAYLAND_DISPLAY', 'DISPLAY',
+            'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'LANG', 'LC_ALL', 'LC_CTYPE',
+            'TZ', 'OMARCHY_SCREENSHOT_DIR', 'OMARCHY_SCREENRECORD_DIR')
+
+
+def child_environment():
+    return {**{key: os.environ[key] for key in ENV_KEYS if key in os.environ},
+            'PATH': '/usr/bin', 'LANG': os.environ.get('LANG', 'C.UTF-8')}
+
+
+def read_bounded(path, limit=JSON_LIMIT):
+    # Bound the actual opened object, including concurrent growth; never block
+    # opening a FIFO or follow a substituted final-component symlink.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError('Expected a regular metadata file')
+        raw = f.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('Metadata exceeds byte limit')
+    return raw
 
 
 def read_json(path, fallback):
     try:
-        with path.open() as f:
-            raw = f.read(16_000_001)
-        if len(raw) > 16_000_000:
-            raise ValueError('JSON exceeds 16 MB')
-        return json.loads(raw)
+        return json.loads(read_bounded(path))
     except FileNotFoundError:
         return fallback
 
@@ -63,20 +85,78 @@ def config():
     return c
 
 
+@contextmanager
+def state_directory(create=False):
+    if not STATE.is_absolute() or '..' in STATE.parts:
+        raise ValueError('State directory must be an absolute path without traversal')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for index, part in enumerate(STATE.parts[1:]):
+            final = index == len(STATE.parts) - 2
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            info = os.fstat(fd)
+            # A root-owned sticky ancestor such as /tmp is safe to traverse
+            # into an owned private directory. Other writable ancestors are not.
+            sticky_root = not final and info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+            if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not sticky_root):
+                raise ValueError('Unsafe state directory ancestor')
+            if final and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+                raise ValueError('State directory must be owned by you with mode 0700')
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def state_name(name):
+    if name not in ('index.json', 'roots.json'):
+        raise ValueError('Unknown state file')
+
+
+def read_state(name, fallback):
+    state_name(name)
+    try:
+        with state_directory() as parent:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, 'rb') as f:
+                info = os.fstat(f.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise ValueError('Unsafe state file')
+                raw = f.read(JSON_LIMIT + 1)
+                if len(raw) > JSON_LIMIT:
+                    raise ValueError('State exceeds byte limit')
+                return json.loads(raw)
+    except FileNotFoundError:
+        return fallback
+
+
 def atomic_json(name, data):
-    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if STATE.is_symlink() or STATE.stat().st_uid != os.getuid():
-        raise ValueError('Unsafe state directory')
-    fd, temp = tempfile.mkstemp(prefix='.write-', dir=STATE)
+    state_name(name)
+    with state_directory(create=True) as parent:
+        _write_state(parent, name, data)
+
+
+def _write_state(parent, name, data):
+    temp = '.write-' + secrets.token_hex(16)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
     try:
         with os.fdopen(fd, 'w') as f:
             json.dump(data, f, ensure_ascii=True, separators=(',', ':'))
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp, STATE / name)
+        os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
     finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
+        try:
+            os.unlink(temp, dir_fd=parent)
+        except FileNotFoundError:
+            pass
 
 
 def local_path(value):
@@ -159,7 +239,7 @@ def roots(c):
     result = []
     for key in ['DESKTOP', 'DOCUMENTS', 'DOWNLOAD', 'PICTURES', 'VIDEOS', 'MUSIC']:
         try:
-            raw = subprocess.check_output(['xdg-user-dir', key], timeout=2, stderr=subprocess.DEVNULL).decode().strip()
+            raw = subprocess.check_output(['/usr/bin/xdg-user-dir', key], timeout=2, stderr=subprocess.DEVNULL, env=child_environment()).decode().strip()
         except (OSError, subprocess.SubprocessError):
             raw = str(HOME / dict(DESKTOP='Desktop', DOCUMENTS='Documents', DOWNLOAD='Downloads', PICTURES='Pictures', VIDEOS='Videos', MUSIC='Music')[key])
         result.append(raw)
@@ -175,10 +255,10 @@ def roots(c):
 
 def scan_root(root, depth, since, sink, budget=15):
     # NUL separates both numeric fields and paths: tabs/newlines stay data.
-    args = ['find', str(root), '-xdev', '-maxdepth', str(depth), '(', '-name', '.*', '-o', '-name', 'node_modules', ')', '-prune', '-o', '-type', 'f', '(', '-newermt', '@' + str(since), '-o', '-newerct', '@' + str(since), ')', '-printf', '%T@\0%C@\0%p\0']
+    args = ['/usr/bin/find', str(root), '-xdev', '-maxdepth', str(depth), '(', '-name', '.*', '-o', '-name', 'node_modules', ')', '-prune', '-o', '-type', 'f', '(', '-newermt', '@' + str(since), '-o', '-newerct', '@' + str(since), ')', '-printf', '%T@\0%C@\0%p\0']
     args[-1] = '%T@\\0%C@\\0%p\\0'  # find's escaped NUL, never an argv NUL
     start = time.monotonic()
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_environment())
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
     buffer, fields, partial = b'', [], False
@@ -222,11 +302,10 @@ def timestamp(value):
 
 
 def xbel(sink):
-    if not XBEL.exists():
+    try:
+        raw = read_bounded(XBEL)
+    except FileNotFoundError:
         return
-    if XBEL.stat().st_size > 16_000_000:
-        raise ValueError('GTK recent list exceeds 16 MB')
-    raw = XBEL.read_bytes()
     if b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper():
         raise ValueError('Unsupported XML declaration in recent list')
     for item in ET.fromstring(raw).iter('bookmark'):
@@ -243,36 +322,41 @@ def browsers(sink, notices):
     dbs += [(p, 'firefox') for p in (HOME / '.mozilla/firefox').glob('*/places.sqlite')]
     if len(dbs) > 24:
         notices.append('Browser scan limited to 24 profiles')
-    runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if not runtime or not Path(runtime).is_dir() or Path(runtime).stat().st_uid != os.getuid():
-        raise ValueError('Browser source needs an owned XDG_RUNTIME_DIR')
+    succeeded = not dbs
     for path, family in dbs[:24]:
-        # SQLite backup includes WAL changes and gives a consistent private copy.
         try:
-            if not path.resolve().is_relative_to(HOME) or path.stat().st_size > 256_000_000:
-                notices.append('Skipped oversized or external browser database')
-                continue
-            with tempfile.TemporaryDirectory(prefix='recents-', dir=runtime) as folder:
-                start = time.monotonic()
-                def progress(*_):
-                    if time.monotonic() - start > 3:
-                        raise TimeoutError('Browser snapshot timed out')
-                with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=.2) as src, sqlite3.connect(str(Path(folder) / 'copy.sqlite')) as db:
-                    src.backup(db, pages=128, progress=progress, sleep=.01)
-                    db.set_progress_handler(lambda: int(time.monotonic() - start > 4), 1000)
-                    if family == 'chrome':
-                        rows = db.execute('SELECT target_path, end_time FROM downloads WHERE state=1 ORDER BY end_time DESC LIMIT 2000')
-                        for p, t in rows:
-                            if p:
-                                sink.add(p, t / 1_000_000 - 11644473600, 'downloaded')
-                    else:
-                        rows = db.execute("SELECT a.content, p.last_visit_date FROM moz_annos a JOIN moz_anno_attributes n ON n.id=a.anno_attribute_id JOIN moz_places p ON p.id=a.place_id WHERE n.name='downloads/destinationFileURI' ORDER BY p.last_visit_date DESC LIMIT 2000")
-                        for uri, t in rows:
-                            p = uri_path(uri)
-                            if p and t:
-                                sink.add(p, t / 1_000_000, 'downloaded')
+            resolved = path.resolve()
+            if not resolved.is_relative_to(HOME):
+                raise ValueError('External browser database')
+            # Read a consistent SQLite transaction directly. No database copy or
+            # temporary snapshot: the page count includes committed WAL pages.
+            start = time.monotonic()
+            with closing(sqlite3.connect(resolved.as_uri() + '?mode=ro', uri=True, timeout=.2)) as db:
+                db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 65_536)
+                db.execute('PRAGMA query_only=ON')
+                db.execute('PRAGMA cache_size=-2048')
+                db.execute('PRAGMA temp_store=MEMORY')
+                db.set_progress_handler(lambda: int(time.monotonic() - start > 4), 1000)
+                db.execute('BEGIN')
+                page_size = db.execute('PRAGMA page_size').fetchone()[0]
+                page_count = db.execute('PRAGMA page_count').fetchone()[0]
+                if page_count * page_size > BROWSER_LIMIT:
+                    raise ValueError('Browser database exceeds byte limit (including WAL)')
+                if family == 'chrome':
+                    rows = db.execute('SELECT target_path, end_time FROM downloads WHERE state=1 ORDER BY end_time DESC LIMIT 2000')
+                    for p, t in rows:
+                        if p:
+                            sink.add(p, t / 1_000_000 - 11644473600, 'downloaded')
+                else:
+                    rows = db.execute("SELECT a.content, p.last_visit_date FROM moz_annos a JOIN moz_anno_attributes n ON n.id=a.anno_attribute_id JOIN moz_places p ON p.id=a.place_id WHERE n.name='downloads/destinationFileURI' ORDER BY p.last_visit_date DESC LIMIT 2000")
+                    for uri, t in rows:
+                        p = uri_path(uri)
+                        if p and t:
+                            sink.add(p, t / 1_000_000, 'downloaded')
+                succeeded = True
         except (OSError, sqlite3.Error, TimeoutError, ValueError):
-            notices.append('A browser profile was unavailable; its results may be incomplete')
+            notices.append('A browser profile was unavailable or exceeded limits; its results may be incomplete')
+    return succeeded
 
 
 def low_battery():
@@ -301,14 +385,17 @@ def scan(scheduled=False):
     sink = Candidates(c, now)
     notices = []
     try:
-        health = read_json(STATE / 'roots.json', {})
+        health = read_state('roots.json', {})
         if not isinstance(health, dict):
             health = {}
     except (ValueError, OSError):
         health = {}
     start = time.monotonic()
+    successful_sources = 0
     if c['sources']['find']:
-        for root in roots(c):
+        scan_roots = roots(c)
+        find_succeeded = not scan_roots
+        for root in scan_roots:
             key = str(root)
             strikes = health.get(key, 0)
             if not isinstance(strikes, int):
@@ -320,20 +407,28 @@ def scan(scheduled=False):
             if remaining <= 0:
                 notices.append('Scan time limit reached; some roots were skipped')
                 break
-            partial, elapsed = scan_root(root, depth, now - c['windowDays'] * 86400, sink, min(15, remaining))
+            try:
+                partial, elapsed = scan_root(root, depth, now - c['windowDays'] * 86400, sink, min(15, remaining))
+                find_succeeded = find_succeeded or not partial
+            except OSError:
+                partial, elapsed = True, 0
             health[key] = strikes + 1 if elapsed > 8 else (strikes if strikes >= 3 else 0)
             if partial:
                 notices.append(root.name + ': partial scan (timeout or unreadable files)')
+        successful_sources += int(find_succeeded)
     if c['sources']['xbel']:
         try:
             xbel(sink)
+            successful_sources += 1
         except (OSError, ValueError, ET.ParseError):
             notices.append('GTK recent list could not be read')
     if c['sources']['browsers']:
         try:
-            browsers(sink, notices)
+            successful_sources += int(browsers(sink, notices))
         except (OSError, ValueError):
-            notices.append('Browser source unavailable: check XDG_RUNTIME_DIR')
+            notices.append('Browser source unavailable')
+    if any(c['sources'].get(key) for key in ('find', 'xbel', 'browsers')) and not successful_sources and not sink.rows:
+        raise ValueError('All enabled recent-file sources failed; previous index retained')
     sink.trim()
     result = dict(version=1, scannedAt=now, home=str(HOME), rows=sorted(sink.rows.values(), key=lambda r: (-r['ts'], r['path'])), partial=bool(notices), notices=list(dict.fromkeys(notices)), capped=sink.capped, config=c, xbelMarker=marker())
     atomic_json('index.json', result)
@@ -349,23 +444,23 @@ def action(verb, value):
     mime = mimetypes.guess_type(str(p))[0] or ''
     if verb == 'open':
         cmd = config()['openWith'].get(p.suffix.lower().lstrip('.')) or config()['openWith'].get(p.suffix.lower())
-        argv = (shlex.split(cmd) if isinstance(cmd, str) else cmd) if cmd else ['xdg-open']
-        subprocess.run([*argv, str(p)], check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        argv = (shlex.split(cmd) if isinstance(cmd, str) else cmd) if cmd else ['/usr/bin/xdg-open']
+        subprocess.run([*argv, str(p)], check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     elif verb == 'reveal':
         try:
-            subprocess.run(['gdbus', 'call', '--session', '--dest', 'org.freedesktop.FileManager1', '--object-path', '/org/freedesktop/FileManager1', '--method', 'org.freedesktop.FileManager1.ShowItems', json.dumps([p.as_uri()]), ''], check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['/usr/bin/gdbus', 'call', '--session', '--dest', 'org.freedesktop.FileManager1', '--object-path', '/org/freedesktop/FileManager1', '--method', 'org.freedesktop.FileManager1.ShowItems', json.dumps([p.as_uri()]), ''], check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
         except (OSError, subprocess.SubprocessError):
-            subprocess.run(['xdg-open', str(p.parent)], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['/usr/bin/xdg-open', str(p.parent)], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     elif verb in ('copy-path', 'copy-file'):
         payload = str(p).encode() if verb == 'copy-path' else (p.as_uri() + '\r\n').encode()
-        subprocess.run(['wl-copy', '--type', 'text/plain;charset=utf-8' if verb == 'copy-path' else 'text/uri-list'], input=payload, check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['/usr/bin/wl-copy', '--type', 'text/plain;charset=utf-8' if verb == 'copy-path' else 'text/uri-list'], input=payload, check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     elif verb == 'copy-image':
         if not mime.startswith('image/'):
             raise ValueError('Selected file is not an image')
         with p.open('rb') as f:
-            subprocess.run(['wl-copy', '--type', mime], stdin=f, check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['/usr/bin/wl-copy', '--type', mime], stdin=f, check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     elif verb == 'trash':
-        subprocess.run(['gio', 'trash', '--', str(p)], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['/usr/bin/gio', 'trash', '--', str(p)], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     elif verb == 'details':
         s = p.stat()
         return {'path': str(p), 'bytes': s.st_size, 'modified': s.st_mtime}
@@ -379,7 +474,7 @@ def main(argv):
     if mode in ('scan', 'scheduled'):
         return scan(mode == 'scheduled')
     if mode == 'cached':
-        result = read_json(STATE / 'index.json', {})
+        result = read_state('index.json', {})
         # Re-apply current configuration to avoid exposing disabled sources on startup.
         c = config()
         if not isinstance(result, dict) or not isinstance(result.get('rows', []), list):
@@ -394,7 +489,7 @@ def main(argv):
         return result
     if mode == 'glyphs' and len(argv) == 2:
         try:
-            charset = subprocess.check_output(['fc-match', '-f', '%{charset}', argv[1][:200]], timeout=2).decode()
+            charset = subprocess.check_output(['/usr/bin/fc-match', '-f', '%{charset}', argv[1][:200]], timeout=2, env=child_environment()).decode()
             spans = [part.split('-') for part in charset.split()]
             needed = [0xf02da, 0xf0219, 0xf02e9, 0xf0567, 0xf0386, 0xf003c, 0xf0169]
             return {'supported': all(any(int(s[0],16) <= code <= int(s[-1],16) for s in spans) for code in needed)}
